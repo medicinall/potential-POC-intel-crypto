@@ -1,0 +1,563 @@
+Algorithme AES-GCM : schéma de conception,
+fonctionnement interne et chiffrement
+authentifié
+Vue d’ensemble du mode AES-GCM
+Le mode AES-GCM (Galois/Counter Mode) est un mode d’opération du chiffrement symétrique AES,
+largement adopté pour son efficacité et ses hautes performances 1 . Il s’agit d’un schéma de
+chiffrement authentifié (AEAD) conçu pour assurer simultanément la confidentialité, l’intégrité et
+l’authenticité des données 2 . En d’autres termes, AES-GCM prend en entrée une clé symétrique K, un
+texte en clair P et éventuellement des données associées AAD (non chiffrées), puis produit un texte
+chiffré C et un tag d’authentification T 3 . Ce tag (aussi appelé code d’authentification de message,
+ou MAC) permet au destinataire disposant de la même clé K de vérifier que ni le texte chiffré ni les
+données associées n’ont été modifiés pendant le transport 3 .
+
+
+Le mode GCM utilise l’algorithme AES couplé au mode compteur (CTR) pour le chiffrement, associé à
+une fonction de hachage universelle (dite GHASH) opérant sur le corps fini GF(2^128) pour
+l’authentification 4 5 . Concrètement, le chiffrement AES en mode CTR génère un flux pseudo-
+aléatoire de bits (keystream) en chiffrant une suite de compteurs, flux qui est XORé avec le texte en clair
+pour produire le texte chiffré 6 . Parallèlement, la fonction GHASH calcule un tag d’authentification en
+traitant les blocs de données à l’aide d’opérations de multiplication dans le champ de Galois GF(2^128)
+(multiplication binaire sans retenue, définie par le polynôme irréductible $x^{128}+x^7+x^2+x+1$) 4 .
+
+
+Grâce à cette conception, AES-GCM assure une protection robuste : toute modification accidentelle ou
+malveillante des données sera détectée avec une probabilité de succès pour l’attaquant négligeable
+(typiquement $<2^{-128}$ avec un tag de 128 bits) 7 . GCM offre ainsi une garantie d’authenticité bien
+plus forte qu’un simple checksum non cryptographique 7 . De plus, ce mode est hautement
+performant car le chiffrement CTR et le calcul GHASH sont entièrement parallélisables et peuvent
+exploiter efficacement les pipelines d’instructions des processeurs modernes 8 . En particulier, les jeux
+d’instructions matériels (Intel AES-NI pour AES et PCLMULQDQ pour GHASH) permettent d’atteindre des
+débits de chiffrement/authentification très élevés avec une surcharge minimale 9 10 .
+
+
+Enfin, selon la spécification NIST 5 , une instance AES-GCM donnée (c’est-à-dire pour une clé et un
+vecteur d’initialisation fixés) peut chiffrer jusqu’à environ $2^{36}$ octets (~68 milliards d’octets, soit
+~64 Go) de données en garantissant l’unicité des compteurs 5 . Les données associées (AAD), qui sont
+authentifiées mais non chiffrées, peuvent quant à elles être d’une longueur pratiquement illimitée par
+invocation 11 . Si aucune donnée confidentielle n’est chiffrée (P vide et uniquement des AAD), AES-GCM
+se réduit au schéma GMAC (Galois Message Authentication Code), qui fournit uniquement un tag
+d’authentification sur les données d’entrée 12 .
+
+
+Schéma 1 : Illustration du fonctionnement d’AES-GCM. Ce schéma présente le processus de chiffrement
+authentifié pour un message de deux blocs de plaintext (Plaintext 1 et Plaintext 2) avec un bloc de
+donnée additionnelle (Auth Data 1). AES en mode CTR chiffre un compteur initial (dérivé de l’IV) et ses
+incréments successifs pour produire un keystream XORé avec chaque bloc de texte en clair, générant
+
+
+
+
+                                                    1
+ainsi le texte chiffré. En parallèle, la fonction GHASH calcule le tag d’authentification en multipliant
+dans $GF(2^{128})$ chaque bloc de données (AAD et texte chiffré) par la clé de hachage H et en
+accumulant le résultat. Le tag final (T) est obtenu en combinant le résultat du GHASH avec le
+chiffrement AES du compteur initial (J0). Le destinataire pourra déchiffrer le texte chiffré à l’aide du
+même keystream CTR et vérifier le tag T pour s’assurer de l’intégrité des données.
+
+
+Chiffrement authentifié et simultané (AES-CTR + GHASH)
+L’atout majeur d’AES-GCM est de chiffrer les données tout en calculant un code d’authentification, le
+tout en une seule passe. Le chiffrement en mode CTR assure la confidentialité : chaque bloc de texte
+en clair est combiné (XOR) avec un bloc de keystream unique, produit en chiffrant un compteur avec la
+clé AES 6 . En GCM, ce compteur est dérivé d’un vecteur d’initialisation (IV ou nonce) unique pour
+chaque message (voir détails plus bas). Simultanément, chaque bloc traité (qu’il s’agisse de texte chiffré
+ou de données associées) est intégré dans le calcul du tag d’authentification via la fonction GHASH. Ce
+procédé d’Authenticated Encryption garantit qu’à la fin du chiffrement, on obtient non seulement le
+texte chiffré C, mais aussi un tag T qui dépend cryptographiquement de toutes les données (plaintext
+et AAD). Ainsi, lors du déchiffrement, la recombinaison du même tag permet de vérifier que C et les AAD
+n’ont subi aucune altération.
+
+
+Techniquement, la fonction GHASH utilise une clé de hachage interne H (dérivée de la clé AES) pour
+multiplier et combiner l’ensemble des blocs de données en un résultat de 128 bits 13 . Ce résultat est
+ensuite chiffré (via AES) ou XORé avec un bloc dérivé de l’IV afin de produire le tag d’authentification T
+ 13   14 . L’algorithme GCM intègre donc de façon élégante un chiffrement (pour la confidentialité) et
+
+un code d’authentification (pour l’intégrité) sans nécessiter deux passes séparées ou deux clés
+distinctes. Cela le distingue, par exemple, d’un schéma classique Encrypt-then-MAC où l’on aurait d’une
+part AES-CBC pour chiffrer puis HMAC pour authentifier – approche plus coûteuse et non simultanée.
+
+
+En AES-GCM, toute modification d’un bit soit dans le texte chiffré, soit dans les données associées
+entraîne avec une probabilité quasi-certaine une discordance du tag à la vérification, invalidant ainsi le
+message 7 . De même, si un adversaire tente de forcer un tag erroné, il n’a qu’une chance sur $2^t$ de
+réussir (où t est la longueur en bits du tag, typiquement 128). AES-GCM fournit donc une sécurité dite
+CAA (Confidentialité + Authentification + Authenticated encryption) très élevée, tant que ses prérequis
+d’utilisation sont respectés (notamment l’unicité du couple clé/IV par message, voir section de sécurité).
+
+
+Composants clés du fonctionnement AES-GCM
+Pour comprendre le fonctionnement interne de AES-GCM, il faut en détailler les principaux composants
+et paramètres :
+
+
+      • Clé de chiffrement AES : clé symétrique secrète de 128, 192 ou 256 bits définissant l’instance
+        d’AES utilisée. La sécurité de GCM repose sur la solidité d’AES lui-même (aucune sous-clé faible
+        n’est connue à ce jour). À partir de cette clé, on dérive notamment la clé de hachage H en
+        chiffrant un bloc de 128 bits de zéros : $H = AES_K(0^{128})$ 13 . Cette valeur H (128 bits) sert de
+        paramètre pour la fonction GHASH. La clé AES est fixée pour une session ou un ensemble de
+        messages, et peut être réutilisée tant que chaque message utilise un IV différent (voir plus
+        bas).
+
+
+      • Vecteur d’initialisation (IV, ou nonce) : valeur de 96 bits (12 octets) recommandée, différente
+        pour chaque message chiffré avec une même clé 15 . L’IV est combiné avec un compteur pour
+        initialiser le mode CTR. Si l’IV fourni fait exactement 96 bits, le standard spécifie de l’étendre en
+
+
+
+
+                                                     2
+       ajoutant un suffixe constant (0^31 || 1) pour former le compteur initial $J_0$ 15 . Par exemple,
+       $J_0 = IV \parallel 0^{31}\parallel 1$ lorsque len(IV)=96 bits. Si l’IV a une longueur arbitraire, AES-
+       GCM le traite via la fonction GHASH elle-même (en le hachant avec H) afin de produire un $J_0$
+       équivalent 14 . L’IV n’a pas besoin de rester secret, mais son unicité est cruciale : chaque IV ne
+       doit servir qu’une seule fois par clé, sans quoi deux messages utiliseraient le même keystream
+       (voir section sécurité). En pratique, l’IV peut être choisi aléatoirement ou via un compteur
+       message, et est généralement transmis en clair avec le texte chiffré.
+
+
+     • AES en mode CTR (Counter) : mode de chiffrement synchrone qui transforme le bloc AES en un
+       générateur de flot de keystream. Dans AES-CTR, on chiffre successivement une valeur de
+       compteur (128 bits) qui s’incrémente pour chaque bloc de 16 octets du message 6 . Le premier
+       bloc chiffré correspond à $J_0 + 1$ (en interprétant $J_0$ comme un entier, on lui ajoute 1
+       modulo $2^{128}$) pour produire le keystream du bloc 1, le second bloc utilise $J_0+2$, etc. Le
+       keystream ainsi obtenu est XORé avec les blocs de texte en clair pour donner les blocs de texte
+       chiffré correspondants 6 . Ce mode ne diffuse pas les modifications entre blocs (contrairement
+       à CBC) mais il a l’avantage d’être parallélisable (chaque bloc de keystream se calcule
+       indépendamment) et de ne pas nécessiter de padding du plaintext. Notons qu’en GCM, le bloc
+       $J_0$ lui-même n’est pas utilisé pour chiffrer les données mais sert dans le calcul du tag (voir plus
+       loin).
+
+
+     • Fonction GHASH (hachage Galois) : fonction d’authentification qui calcule un code de 128 bits à
+       partir des données à protéger, en effectuant des multiplications dans $GF(2^{128})$. GHASH
+       traite à la fois les AAD (données associées non chiffrées) et le texte chiffré pour produire une
+       empreinte unique. Formellement, on considère l’ensemble des blocs de 128 bits constitués par :
+       tous les blocs AAD (éventuellement zéro-padés), suivis de tous les blocs du texte chiffré (zéro-
+       padés le cas échéant), et enfin un bloc spécial contenant les longueurs (64 bits) de AAD et du
+       texte chiffré 16 . Ce dernier bloc assure que la concaténation des données est sans ambiguïté.
+       Soit $S_1, S_2, \dots, S_n$ ces blocs de 128 bits (avec $n=m+n+1$ en notant $m$ le nombre de
+       blocs AAD et $n$ le nombre de blocs chiffrés). La fonction GHASH est alors définie par :
+
+
+\
+
+
+          X_0 = 0^{128}, \quad X_i = (X_{i-1} \oplus S_i) \cdot H \quad \text{pour } 1 \le i \le n \
+
+
+C’est une évaluation polynomiale itérative, où chaque nouveau bloc $S_i$ est XORé au cumul $X_{i-1}$
+puis multiplié par H dans $GF(2^{128})$ 17 . Le résultat final $X_n$ (128 bits) est la sortie de GHASH.
+Cette multiplication dans le champ de Galois repose sur l’arithmétique binaire modulo le polynôme
+$x^{128}+x^7+x^2+x+1$ (opération de multiply sans retenue, implémentable via l’instruction
+PCLMULQDQ par exemple) 4 . Notons que GHASH est une fonction linéaire par rapport aux données
+d’entrée pour un H donné, ce qui sera important pour l’analyse de sécurité.
+
+
+     • Tag d’authentification (T) : aussi appelé MAC Galois, c’est le code d’intégrité calculé en sortie.
+       Dans AES-GCM standard, le tag est de 128 bits (16 octets), mais il peut être tronqué selon les
+       applications (par exemple 96 ou 64 bits) – au prix d’une sécurité réduite 18 . Le tag est obtenu en
+       combinant les résultats des deux composants précédents : $T = E_K(J_0) \oplus X_n$, où $X_n$
+       est le résultat final de GHASH et $E_K(J_0)$ désigne le chiffrement AES du compteur initial $J_0$
+       avec la clé K 13 14 . Cette valeur $E_K(J_0)$ joue le rôle d’une masse cryptographique venant
+       brouiller le résultat du hachage (technique dite Encrypt-then-Authenticate). Le tag $T$ est transmis
+       avec le texte chiffré et l’IV au destinataire, qui recalculera de son côté $T'$ et vérifiera que $T' =
+       T$ pour valider l’intégrité/authenticité. En cas de non-correspondance du tag, le message doit
+       être rejeté. En pratique, il est fortement déconseillé d’utiliser des tags raccourcis (par ex. 32 ou
+
+
+
+                                                      3
+      64 bits) car la probabilité de collision augmente considérablement, facilitant de potentielles
+      falsifications 19 . Un tag de 128 bits offre une sécurité de type « une chance sur $2^{128}$ » à un
+      forgery aveugle, ce qui est largement suffisant pour décourager toute attaque bruteforce
+      réaliste.
+
+
+Processus de chiffrement AES-GCM étape par étape
+Pour chiffrer un message avec AES-GCM (en intégrant l’authentification), les opérations s’enchaînent
+généralement dans l’ordre suivant :
+
+
+    1. Initialisation – Charger la clé symétrique K et préparer les sous-clés : en particulier, calculer la
+       clé de hachage $H = AES_K(0^{128})$. Préparer le vecteur d’initialisation (IV) unique pour ce
+       message. Si l’IV n’a pas la longueur standard de 96 bits, le compresser en un bloc de 128 bits via
+       GHASH (avec la clé H) 14 . Définir ainsi le compteur initial $J_0$ (128 bits).
+
+
+    2. Traitement des données associées (AAD) – Parcourir toutes les données additionnelles qui
+       doivent être seulement authentifiées (et non chiffrées). Ces données AAD (s’il y en a) sont
+       découpées en blocs de 128 bits et fournies à la fonction GHASH pour mettre à jour l’empreinte
+       d’authentification. Concrètement, chaque bloc AAD $A_i$ est XORé au registre intermédiaire $X$
+       (initialisé à 0) puis multiplié par $H$ dans $GF(2^{128})$, de façon itérative 20 . Cette étape peut
+       être effectuée bloc par bloc en parallèle du chiffrement, ou en amont. (S’il n’y a pas de données
+       associées, on passe directement à l’étape suivante en conservant $X_0 = 0$).
+
+
+    3. Chiffrement du texte en clair – Diviser le plaintext P en blocs de 128 bits (16 octets) : $P_1, P_2,
+       \dots, P_n$ (le dernier bloc étant complété par bourrage zéro si nécessaire). Pour chaque bloc
+       $P_i$ :
+
+
+    4. Calculer le compteur suivant : $J_i = J_0 + i$ (addition mod $2^{128}$) pour obtenir un bloc
+       nonce+compteur unique.
+    5. Chiffrer $J_i$ avec AES pour obtenir le keystream $S_i = AES_K(J_i)$ (128 bits).
+    6. Calculer le bloc chiffré $C_i$ en faisant $C_i = P_i \oplus S_i$ (XOR octet par octet du bloc).
+
+    7. Mettre à jour le GHASH d’authentification : XORer $C_i$ (considéré comme 128 bits, padding zéro
+       si nécessaire pour le dernier bloc) au registre intermédiaire actuel, puis multiplier par $H$. Ainsi,
+       le texte chiffré est intégré dans le calcul du tag autant que le serait le texte en clair (le choix de
+       hasher le texte chiffré garantit que l’authentification couvre ce qui est effectivement transmis).
+
+
+    8. Finalisation du GHASH – Une fois tous les blocs AAD et chiffrés traités, incorporer enfin un bloc
+       spécial contenant les longueurs (en bits) des AAD et du plaintext 16 . Ce bloc de 128 bits est
+       formé de deux entiers 64-bit : $\text{len}(AAD)$ et $\text{len}(P)$, concaténés. Il est XORé à son
+       tour avec l’état intermédiaire $X$ puis multiplié par $H$ une dernière fois 16 . Le résultat
+       obtenu, noté $X_{\text{final}}$, constitue la valeur GHASH complète sur l’ensemble $(AAD, C)$.
+
+
+    9. Calcul du tag $T$ – Chiffrer le compteur initial $J_0$ avec AES : $E = AES_K(J_0)$ (128 bits). Puis
+       combiner $E$ avec la valeur GHASH précédente pour obtenir le tag : $T = X_{\text{final}} \oplus
+       E$ 13 14 . Ce tag d’authentification (généralement codé sur 128 bits, éventuellement tronqué
+       selon les besoins) accompagne le texte chiffré en sortie.
+
+
+   10. Sortie du message chiffré – Transmettre ou stocker le couple $(C, T)$, en y joignant l’IV utilisé.
+       Le destinataire aura besoin de ces trois éléments pour déchiffrer et vérifier l’intégrité. À ce stade,
+       le chiffrement AES-GCM est terminé ; le contexte interne (état du compteur et de GHASH) peut
+
+
+
+                                                     4
+      être réinitialisé pour un éventuel prochain message avec la même clé (ou détruit si la clé est
+      périmée).
+
+
+Processus de déchiffrement AES-GCM étape par étape
+Le déchiffrement d’un message AES-GCM chiffré en bloc $(C, T)$ se déroule en miroir du chiffrement, en
+vérifiant l’authenticité avant de rendre le plaintext en clair :
+
+
+    1. Initialisation – Charger la clé symétrique K du destinataire et recomposer la clé de hachage $H
+       = AES_K(0^{128})$. Récupérer l’IV fourni avec le message et reconstituer le compteur initial $J_0$
+       (en ajoutant le suffixe 0x...01 si IV de 96 bits, ou en le recalculant via GHASH si IV arbitraire,
+       conformément aux mêmes règles qu’à l’encryption) 15 .
+
+
+    2. Traitement des AAD – Parcourir les données associées (AAD) transmises avec le message et
+       calculer leur contribution à l’authentification via GHASH, exactement comme côté émetteur. On
+       obtient ainsi un état intermédiaire $X'$ après intégration de tous les blocs AAD (s’il y en a).
+
+
+    3. Déchiffrement du texte chiffré – Découper le ciphertext C en blocs $C_1, C_2, \dots, C_n$ de
+       128 bits. Pour chaque bloc $C_i$ :
+
+
+    4. Recalculer le même keystream $S_i = AES_K(J_0 + i)$ en chiffrant le $i$-ème compteur (identique
+       à celui utilisé pour chiffrer).
+    5. Récupérer le bloc en clair en faisant $P_i = C_i \oplus S_i$.
+
+    6. Parallèlement, intégrer $C_i$ dans le calcul de GHASH d’authentification : XORer $C_i$ avec
+       l’état $X'$ courant puis multiplier par $H$. (Remarque : l’ordre des opérations de déchiffrement et de
+       calcul du GHASH n’a pas d’importance, on peut traiter le GHASH en streaming pendant la décryption,
+       ou après. L’essentiel est d’utiliser exactement les mêmes données AAD et C que celles reçues.)
+
+
+    7. Finalisation et comparaison du tag – Après avoir traité tous les blocs, incorporer le bloc des
+       longueurs $(len(AAD), len(C))$ dans le GHASH comme à l’encryption, puis multiplier par $H$ une
+       dernière fois. On obtient le résultat $X'{\text{final}}$ du GHASH côté réception. Chiffrer également
+       $J_0$ par AES pour obtenir $E = AES_K(J_0)$, puis combiner avec $X'$ afin de }recalculer le tag : $T'
+       = X'_{\text{final}} \oplus E$. Enfin, comparer $T'$ avec le tag reçu $T$ :
+
+
+    8. Si $T' = T$, l’authenticité et l’intégrité du message sont confirmées. Le plaintext P reconstitué
+       peut alors être délivré à l’application ou à l’utilisateur.
+    9. Si $T' \neq T$, la vérification a échoué : cela indique soit une altération des données (erreur de
+       transmission, modification malveillante), soit une utilisation d’une mauvaise clé ou IV. Dans ce
+       cas, le déchiffrement est rejeté – en pratique l’implantation peut retourner une erreur et aucune
+       donnée en clair ne doit être révélée.
+
+Notons que, dans de bonnes pratiques, on ne révèle le plaintext déchiffré qu’après une validation
+réussie du tag d’authentification, afin d’éviter toute fuite de donnée non vérifiée. De plus, la
+comparaison des tags $T'$ et $T$ doit être réalisée en temps constant (pour prévenir les attaques
+temporisées).
+
+
+
+
+                                                      5
+Exemples concrets (théoriques et pratiques)
+
+Exemple théorique de calcul du tag GHASH
+
+Pour illustrer le calcul interne du tag, prenons un scénario simple : une seule portion de données
+associées $A$ (128 bits) et deux blocs de texte en clair $P_1, P_2$ (donc deux blocs chiffrés $C_1, C_2$
+correspondants après chiffrement CTR). Le hash key H a été pré-calculé via $H = AES_K(0^{128})$. Le
+processus GHASH procédera ainsi pour calculer $T$ :
+
+
+     • Initialement, $X_0 = 0^{128}$ (registre de 128 bits à zéro).
+     • Intégration de la donnée associée : $X_1 = (X_0 \oplus A_1) \cdot H = A_1 \cdot H$. (Ici $A_1$
+       représente le bloc AAD, et l’opération $\cdot$ est la multiplication dans $GF(2^{128})$ modulo
+       $x^{128}+x^7+x^2+x+1$).
+     • Intégration du premier bloc chiffré : $X_2 = (X_1 \oplus C_1) \cdot H$.
+     • Intégration du deuxième bloc chiffré : $X_3 = (X_2 \oplus C_2) \cdot H$.
+     • Intégration des longueurs : on forme le bloc $L = (\text{len}(A)||\text{len}(P))$ codant sur 64 bits
+       chacune la taille en bits de $A$ et de $P$. Ici, $\text{len}(A)=128$ et $\text{len}(P)=256$. On
+       calcule $X_4 = (X_3 \oplus L) \cdot H$ 16 .
+     • Le résultat final du GHASH est $X_4$. Le tag est alors obtenu en combinant ce résultat avec le
+       chiffrement de $J_0$ : $T = X_4 \oplus AES_K(J_0)$ 13 .
+
+Dans ce schéma d’exemple, $T$ dépend de chaque bit de $A_1, C_1, C_2$ (via les XOR successifs) et de la
+clé H (via les multiplications par $H$). Toute différence dans l’un de ces blocs produirait un $T$
+complètement différent de l’original avec une probabilité quasi-certaine de $1 - 2^{-128}$.
+
+
+Extrait de code C – utilisation d’AES-GCM (bibliothèque OpenSSL EVP)
+
+Pour démontrer l’utilisation concrète de AES-GCM, voici un extrait de code en langage C utilisant l’API
+EVP d’OpenSSL. Cet exemple montre le chiffrement d’un buffer en AES-128-GCM avec une clé et un IV
+donnés, l’ajout de données associées, et la récupération du tag d’authentification :
+
+
+
+  #include <openssl/evp.h>
+  // ... (initialisation OpenSSL)
+
+  // Clé AES 128 bits et IV 96 bits en entrée (par exemple)
+  unsigned char key[16] = { /* 16 octets de clé */ };
+  unsigned char iv[12] = { /* 12 octets d'IV */ };
+  unsigned char plaintext[PLAINTEXT_LEN] = { /* ... */ };
+  unsigned char aad[AAD_LEN] = { /* données associées */ };
+
+  unsigned char ciphertext[PLAINTEXT_LEN];
+  unsigned char tag[16]; // tag 128 bits (16 octets)
+
+  EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+  EVP_EncryptInit_ex(ctx, EVP_aes_128_gcm(), NULL, NULL, NULL);
+  EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, sizeof(iv), NULL);
+
+  // Initialiser la clé et l’IV
+  EVP_EncryptInit_ex(ctx, NULL, NULL, key, iv);
+
+
+
+
+                                                    6
+  // Fournir les données associées à authentifier
+  int outlen;
+  EVP_EncryptUpdate(ctx, NULL, &outlen, aad, AAD_LEN);
+
+  // Chiffrer le plaintext (en place dans cet exemple)
+  EVP_EncryptUpdate(ctx, ciphertext, &outlen, plaintext, PLAINTEXT_LEN);
+
+  // Finaliser (récupérer d’éventuels octets restants – ici aucun car GCM n’a
+  pas de padding)
+  EVP_EncryptFinal_ex(ctx, ciphertext + outlen, &outlen);
+
+  // Récupérer le tag d’authentification calculé
+  EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, 16, tag);
+
+  EVP_CIPHER_CTX_free(ctx);
+  // ciphertext contient le texte chiffré de longueur PLAINTEXT_LEN
+  // tag contient le MAC de 16 octets
+
+
+Dans cet extrait, on utilise EVP_aes_128_gcm() pour spécifier l’algorithme AES-128 en mode GCM.
+On initialise ensuite la clé et le vecteur d’initialisation (IV). Les données associées (AAD) sont passées via
+ EVP_EncryptUpdate avec out à NULL (car elles ne produisent pas de sortie chiffrée, mais sont
+intégrées dans le tag). Le plaintext est chiffré bloc par bloc et la sortie est collectée dans ciphertext .
+Enfin, l’appel à    EVP_CIPHER_CTX_ctrl         avec l’option   EVP_CTRL_GCM_GET_TAG          extrait le tag
+d’authentification calculé en interne. Ce tag de 16 octets, ainsi que l’IV, devront être transmis au
+destinataire avec le ciphertext. Côté déchiffrement, l’API symétrique d’OpenSSL permettrait de réaliser
+l’opération inverse via EVP_DecryptInit_ex , EVP_DecryptUpdate (en fournissant le ciphertext
+puis le tag via    EVP_CTRL_GCM_SET_TAG ) et         EVP_DecryptFinal_ex , afin de vérifier le tag et
+récupérer le plaintext en clair.
+
+
+Extrait de code Python – utilisation d’AES-GCM (PyCryptodome)
+
+En Python, la bibliothèque PyCryptodome offre une interface simple pour AES-GCM. L’exemple ci-dessous
+chiffre puis déchiffre une donnée en AES-256-GCM, en illustrant l’utilisation du tag et la vérification
+d’intégrité automatique :
+
+
+
+  from Crypto.Cipher import AES
+
+  # Clé 256 bits et IV 96 bits (exemple aléatoire pour la démonstration)
+  key = b'\x01\x02...\x20'         # 32 octets
+  iv = b'\x01\x02...\x0c'          # 12 octets (96 bits)
+  plaintext = b"Message secret confidentiel"
+  aad = b"En-tete: 1234"           # données associées
+
+  # Chiffrement AES-256-GCM
+  cipher = AES.new(key, AES.MODE_GCM, nonce=iv)
+  cipher.update(aad)              # intégrer les AAD dans le calcul du tag
+  ciphertext, tag = cipher.encrypt_and_digest(plaintext)
+  print("Texte chiffré :", ciphertext.hex())
+  print("Tag d'authentification :", tag.hex())
+
+
+
+
+                                                      7
+  # Déchiffrement AES-256-GCM
+  decipher = AES.new(key, AES.MODE_GCM, nonce=iv)
+  decipher.update(aad)             # fournir les AAD pour recomputer le tag
+  try:
+       decrypted = decipher.decrypt_and_verify(ciphertext, tag)
+      print("Texte déchiffré :", decrypted.decode())
+  except ValueError:
+      print("Échec de l'authentification du message !")
+
+
+Dans ce code, l’objet AES.new(..., AES.MODE_GCM, nonce=iv) initialise le chiffreur en mode GCM
+avec la clé et l’IV spécifiés. La méthode update() sert à inclure les données associées (AAD) avant le
+chiffrement du plaintext. La méthode        encrypt_and_digest()        chiffre le plaintext et retourne
+simultanément le texte chiffré et le tag d’authentification calculé. Ces deux valeurs sont affichées en
+hexadécimal. Ensuite, pour le déchiffrement, on reconfigure un objet AES-GCM avec la même clé et le
+même IV, on refournit les AAD via update() , puis on appelle decrypt_and_verify(ciphertext,
+tag) . Cette méthode renvoie le plaintext déchiffré uniquement si le tag fourni est valide – en cas de
+discordance, elle lève une exception ( ValueError ). Dans notre exemple, comme la clé, l’IV et le tag
+correspondent bien aux données, le message original est correctement déchiffré et affiché. Si on
+modifiait ne serait-ce qu’un octet de ciphertext ou de tag , la vérification échouerait et
+déclencherait l’exception d’authentification (gérée ici par le bloc try/except ).
+
+
+Analyse de sécurité et cryptanalyse d’AES-GCM (sans la clé)
+Du point de vue d’un attaquant ne disposant pas de la clé K, AES-GCM est considéré comme très sûr si
+ses conditions d’utilisation sont respectées (notamment la non-réutilisation des IV et un tag
+suffisamment long). Il combine la robustesse d’AES (chiffre symétrique éprouvé) avec celle d’un code
+d’authentification polynomial. À ce jour, aucune attaque cryptanalytique pratique n’est connue contre
+AES-GCM correctement implémenté : l’algorithme ne présente pas de faille exploitable en dehors
+d’une recherche exhaustive de la clé ou du tag. Ainsi, connaître du texte en clair et le texte chiffré
+correspondant ne donne à l’adversaire aucun avantage significatif pour retrouver la clé secrète 21 . En
+effet, même si un attaquant connaît une portion du plaintext, il peut en déduire le keystream XOR
+(puisque $P \oplus S = C$ implique $S = P \oplus C$), mais cela ne l’aide pas à trouver la clé K car ce
+keystream correspond à des sorties chiffrées d’un compteur et non à une structure faible d’AES 22 . AES
+est conçu pour résister aux attaques par plaintext connu : disposer de paires plaintext/chiffré ne permet
+pas de remonter à la clé plus vite que l’essai de toutes les clés possibles (soit $2^{128}$ opérations pour
+AES-128, ce qui est totalement hors de portée) 23 . De même, le tag d’authentification, bien qu’étant
+une sortie relativement courte (128 bits), ne révèle rien de la clé tant que l’attaquant ne peut pas en
+obtenir pour de multiples messages de son choix (voir plus loin le cas du nonce réutilisé).
+
+
+Il existe toutefois deux points de faiblesse majeurs si l’on sort du cadre d’utilisation recommandé,
+tous deux liés à une mauvaise gestion du vecteur d’initialisation (IV/nonce) :
+
+
+     • Réutilisation du même IV (nonce) avec la même clé – Ceci est catastrophique pour AES-GCM. Si
+       deux textes en clair $P$ et $P'$ sont chiffrés avec la même clé K et le même IV $IV_0$, alors ils
+       utiliseront exactement le même keystream. L’attaquant peut alors XORer les deux textes chiffrés $C
+       \oplus C'$ pour éliminer le keystream et obtenir $P \oplus P'$ (XOR des deux plaintexts) 24 . Il
+       devient alors possible de récupérer les deux messages par des techniques d’analyse classique si
+       l’un des deux est partiellement connu (attaque du texte chiffré XOR, aussi appelée crib dragging
+       en anglais). Pire encore, avec deux ciphertexts ayant le même nonce, l’attaquant peut exploiter la
+       linéarité de GHASH pour résoudre la clé de hachage H. En effet, connaissant $C, C'$ et les tags $T,
+
+
+
+
+                                                    8
+       T'$ correspondants, il obtient deux équations linéaires sur $H$ dont il peut déduire la valeur
+       (voir par ex. l’attaque du papier de Bock et al. 2016) 24 . Une fois H compromise, l’adversaire
+       pourrait contrefaire des tags sur d’autres messages (authentification rompue). La littérature et les
+       outils de sécurité appellent cette classe d’attaques “nonce reuse” ou “nonce-disrespect” 25 .
+       Conclusion : il est impératif de n’utiliser jamais deux fois le même IV avec la même clé. En
+       pratique, on utilise soit un compteur de message (incrémental) combiné à un sel unique par clé,
+       soit un IV aléatoire de 96 bits avec une probabilité de collision négligeable.
+
+
+     • Tag d’authentification tronqué ou trop court – Réduire la taille du tag T diminue
+       exponentiellement la sécurité de l’authentification. Par exemple, un tag de 32 bits offre $2^{32}$
+       possibilités, ce qui signifie qu’un attaquant pourrait réussir à forger un message accepté après
+       en moyenne $2^{31}$ essais (soit ~2 milliards d’essais, ce qui peut être envisageable si
+       l’environnement permet de tester massivement des tags). Les spécifications NIST recommandent
+       un tag d’au moins 96 bits pour les usages courants, et idéalement 128 bits complets pour une
+       sécurité maximale 18 . L’utilisation de tags courts est découragée, sauf éventuellement dans des
+       contraintes très spécifiques, et toujours en acceptant une dégradation du niveau de sécurité.
+
+
+En dehors de ces erreurs d’utilisation, AES-GCM hérite de la solidité d’AES vis-à-vis des attaques
+cryptanalytiques classiques. Les meilleures attaques théoriques sur AES (du type cryptanalyse biclique
+ou differential-linear) ne réduisent que marginalement sa complexité (par ex. $2^{126}$ au lieu de
+$2^{128}$ pour AES-128, ce qui reste inatteignable). GHASH, de son côté, est une fonction de hachage
+universelle bien étudiée mathématiquement ; sa sécurité repose sur la difficulté pour un attaquant de
+trouver des collisions non triviales ou d’inverser la multiplication dans $GF(2^{128})$ sans connaître la
+clé H. Toute tentative de falsification de tag sans la clé revient à deviner une combinaison d’une fonction
+pseudo-aléatoire et d’un hash : sans information additionnelle, la meilleure stratégie de l’attaquant est
+l’essai aléatoire, avec une probabilité de succès de $2^{-128}$ pour chaque tentative (avec tag plein).
+Même en accumulant de nombreux tags observés, l’attaquant ne peut en tirer avantage tant que l’IV
+n’est pas réutilisé, puisque chaque message utilise une entrée $E_K(J_0)$ différente qui rend les tags
+incomparables entre messages.
+
+
+En contexte de recherche ou d’audit de sécurité, l’analyse d’AES-GCM se concentrera donc sur la
+vérification du respect des bonnes pratiques (unicité des IV, longueur du tag, génération aléatoire de la
+clé) et sur les éventuelles fuites de côté. En effet, les attaques par canal auxiliaire (side-channel)
+représentent souvent le seul vecteur praticable pour compromettre AES-GCM sans connaître la clé.
+Celles-ci consistent à exploiter des fuites d’implémentation – par exemple les variations de temps
+d’exécution, de consommation électrique ou d’émissions électromagnétiques – afin de remonter à la clé
+secrète. AES-GCM, s’il est implémenté avec les instructions matérielles dédiées (AES-NI, PCLMULQDQ),
+est relativement bien protégé contre les timings leaks, car ces instructions sont en temps constant et
+évitent les tables de substitution susceptibles de provoquer des attaques par cache 26 . Cependant,
+une implémentation logicielle naïve d’AES ou de la multiplication GF(2^128) pourrait laisser fuiter des
+informations (par exemple via des accès mémoire dépendant des données). Intel fournit d’ailleurs dans
+sa bibliothèque des fonctions spécifiques pour ajouter du bruit ou contraindre l’exécution (par ex.
+ ippsAES_GCMSetupNoise ) afin de se prémunir contre d’éventuelles attaques par analyse de
+fréquence d’horloge ou autres canaux cachés 27 . En résumé, aucune attaque purement
+cryptanalytique n’est connue contre AES-GCM, et les seuls vecteurs réalistes pour “décrypter sans la
+clé” passent soit par l’exploitation d’erreurs de déploiement (répétition de nonce, tag insuffisant), soit
+par des attaques physiques sur l’implémentation. En respectant le cadre d’utilisation recommandé et
+en utilisant des implémentations éprouvées, AES-GCM demeure à l’état de l’art un algorithme de
+chiffrement authentifié de confiance pour la protection des données sensibles 21 28 .
+
+
+
+
+                                                    9
+Sources : Documentation Intel® IPP Cryptography 29                        30 , Wikipedia (fr/en)   4   31 , NIST SP 800-38D,
+
+Crypto.StackExchange 21 32 , Reddit/r/crypto 24 .
+
+
+
+ 1    2   4    Galois/Counter Mode — Wikipédia
+https://fr.wikipedia.org/wiki/Galois/Counter_Mode
+
+ 3    6   8    10   13   14   15   16   17   18   19   20   31   Galois/Counter Mode - Wikipedia
+https://en.wikipedia.org/wiki/Galois/Counter_Mode
+
+ 5    7   11   12   29   30   AES-GCM Functions — Documentation for Intel® oneAPI Programming Guide
+https://intel.github.io/cryptography-primitives/aes-gcm-functions.html
+
+ 9   Advanced Encryption Standard Galois Counter Mode - Optimized GHASH Function Technology Guide
+https://builders.intel.com/docs/networkbuilders/advanced-encryption-standard-galois-counter-mode-optimized-ghash-
+function-technology-guide-1693300747.pdf
+
+21   22   23   28 aes gcm - For AES-GCM, does knowing plaintext and ciphertext allow attacker to learn
+                    32
+
+the key? - Cryptography Stack Exchange
+https://crypto.stackexchange.com/questions/100521/for-aes-gcm-does-knowing-plaintext-and-ciphertext-allow-attacker-to-
+learn-the-k
+
+24   25 Trying to find a way to exploit AES-GCM, can anyone point me in that direction? ( for a challenge
+all above board :) : r/crypto
+https://www.reddit.com/r/crypto/comments/gak0mm/trying_to_find_a_way_to_exploit_aesgcm_can_anyone/
+
+26   So what hearing is: - AES is vulnerable to timing attacks by design ...
+https://news.ycombinator.com/item?id=8597137
+
+27   Data Security Considerations — Documentation for Intel® oneAPI Programming Guide
+https://intel.github.io/cryptography-primitives/data-security-considerations.html
+
+
+
+
+                                                                     10
+
